@@ -61,16 +61,20 @@ app.post('/api/decode-aadhaar', (req, res) => {
         }
         if (currentPart.length > 0) parts.push(Buffer.from(currentPart));
 
-        // 4. Photo aur Text Parts ko alag Karein
+
+        // 4. Photo aur Text Parts Extract Karein
         let photoBase64 = null;
         let textParts = [];
 
         parts.forEach((part) => {
-            // JPEG Header (0xFF 0xD8 -> 255, 216) ya Large Buffer check karein
-            if (part.length > 500 || (part.length > 2 && part[0] === 255 && part[1] === 216)) {
+            // Check if buffer is JPEG photo (Header: 255, 216) ya Size > 300 bytes
+            if (part.length > 300 || (part.length > 2 && part[0] === 255 && part[1] === 216)) {
                 photoBase64 = `data:image/jpeg;base64,${part.toString('base64')}`;
             } else {
-                textParts.push(part.toString('utf8').trim());
+                const textStr = part.toString('utf8').trim();
+                if (textStr.length > 0) {
+                    textParts.push(textStr);
+                }
             }
         });
 
