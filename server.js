@@ -3,13 +3,10 @@ const zlib = require('zlib');
 
 const app = express();
 
-// Catch all raw body formats
 app.use(express.text({ type: '*/*', limit: '10mb' }));
 app.use(express.json({ limit: '10mb' }));
 
-// Clean BigInt to Bytes Function
 function bigIntToBytes(bigIntString) {
-    // SIRF Digits (0-9) rakhein, bakisab (spaces, newlines, quotes) hata dein
     const cleanNumericString = String(bigIntString).replace(/\D/g, '');
 
     if (!cleanNumericString) {
@@ -19,7 +16,6 @@ function bigIntToBytes(bigIntString) {
     let bigInt = BigInt(cleanNumericString);
     let hex = bigInt.toString(16);
 
-    // Byte alignment (Even Hex Length)
     if (hex.length % 2 !== 0) {
         hex = '0' + hex;
     }
@@ -31,22 +27,22 @@ app.post('/api/decode-aadhaar', (req, res) => {
     try {
         let rawInput = req.body;
 
-        // Agar JSON String me aaya ho
         if (typeof rawInput === 'string' && rawInput.trim().startsWith('{')) {
             try {
                 const parsed = JSON.parse(rawInput);
                 rawInput = parsed.qrData || rawInput;
             } catch (e) {
-                // Ignore parse error
+                // Ignore
             }
         }
 
-        console.log("--> Received Data Length:", String(rawInput).length);
+        const cleanDigits = String(rawInput).replace(/\D/g, '');
+        console.log("--> Received Clean Data Length:", cleanDigits.length);
 
-        // 1. BigInt Conversion
+        // 1. Convert BigInt to Bytes
         let compressedBuffer;
         try {
-            compressedBuffer = bigIntToBytes(rawInput);
+            compressedBuffer = bigIntToBytes(cleanDigits);
         } catch (err) {
             return res.status(400).json({ 
                 success: false, 
@@ -55,19 +51,33 @@ app.post('/api/decode-aadhaar', (req, res) => {
             });
         }
 
-        // 2. Zlib Decompression
-        let decompressedBuffer;
+        // 2. Multi-Format Decompression (Fallback mechanism)
+        let decompressedBuffer = null;
+
+        // Try 1: Inflate Raw
         try {
             decompressedBuffer = zlib.inflateRawSync(compressedBuffer);
-        } catch (err) {
-            return res.status(500).json({ 
-                success: false, 
-                message: "Zlib Decompression Failed. QR Data corrupt ho sakta hai.", 
-                error: err.message 
-            });
+        } catch (e1) {
+            // Try 2: Standard Inflate (with header)
+            try {
+                decompressedBuffer = zlib.inflateSync(compressedBuffer);
+            } catch (e2) {
+                // Try 3: Gunzip
+                try {
+                    decompressedBuffer = zlib.gunzipSync(compressedBuffer);
+                } catch (e3) {
+                    console.error("All decompression methods failed.");
+                    return res.status(400).json({ 
+                        success: false, 
+                        message: "Decompression failed. Data cut ya corrupt hai.", 
+                        receivedLength: cleanDigits.length,
+                        error: e1.message 
+                    });
+                }
+            }
         }
 
-        // 3. Byte 255 (0xFF) Delimiter Parsing
+        // 3. Byte 255 Delimiter Parsing
         const parts = [];
         let currentPart = [];
         for (let i = 0; i < decompressedBuffer.length; i++) {
@@ -108,7 +118,7 @@ app.post('/api/decode-aadhaar', (req, res) => {
         console.error("General Error:", error.message);
         return res.status(500).json({ 
             success: false, 
-            message: "Internal Server Processing Error", 
+            message: "Internal Processing Error", 
             error: error.message 
         });
     }
