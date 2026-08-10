@@ -1,32 +1,48 @@
+const express = require('express');
+const zlib = require('zlib');
+
+const app = express();
+
+// MOST IMPORTANT: Kisi bhi tarah ke Content-Type data ko Text ke roop me catch karega
+app.use(express.text({ type: '*/*', limit: '10mb' }));
+app.use(express.json({ limit: '10mb' }));
+
+function bigIntToBytes(bigIntString) {
+    let bigInt = BigInt(bigIntString);
+    const hex = bigInt.toString(16);
+    const evenHex = hex.length % 2 === 0 ? hex : '0' + hex;
+    return Buffer.from(evenHex, 'hex');
+}
+
 app.post('/api/decode-aadhaar', (req, res) => {
     try {
-        let qrData = null;
+        let qrData = req.body;
 
-        // 1. Agar JSON body aayi ho
-        if (req.body && typeof req.body === 'object') {
-            qrData = req.body.qrData;
-        }
-
-        // 2. Agar String ke roop me payload aaya ho
-        if (!qrData && typeof req.body === 'string') {
+        // 1. Agar data JSON String format me mila ho
+        if (typeof qrData === 'string' && qrData.trim().startsWith('{')) {
             try {
-                const parsed = JSON.parse(req.body);
-                qrData = parsed.qrData || req.body;
+                const parsed = JSON.parse(qrData);
+                qrData = parsed.qrData || qrData;
             } catch (e) {
-                qrData = req.body; // Raw numeric text string
+                // Ignore parse error
             }
         }
 
-        // 3. Agar fir bhi qrData nahi mila
-        if (!qrData || qrData.trim() === '') {
-            console.log("Error 400: Received Empty Payload. Body:", req.body);
+        // 2. Extra quotes ya spaces clean karein
+        if (typeof qrData === 'string') {
+            qrData = qrData.trim().replace(/^"|"$/g, '');
+        }
+
+        // 3. Data validation
+        if (!qrData || qrData.length < 10) {
+            console.log("Error: Data Empty ya invalid mila:", qrData);
             return res.status(400).json({ 
                 success: false, 
-                message: "qrData empty or invalid format" 
+                message: "QR Data khali ya invalid hai" 
             });
         }
 
-        // --- Decoding Logic ---
+        // --- Aadhaar Decoding Logic ---
         const compressedBuffer = bigIntToBytes(qrData);
         const decompressedBuffer = zlib.inflateRawSync(compressedBuffer);
 
@@ -71,3 +87,6 @@ app.post('/api/decode-aadhaar', (req, res) => {
         });
     }
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
