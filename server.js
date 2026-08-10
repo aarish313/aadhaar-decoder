@@ -1,41 +1,37 @@
-const express = require('express');
-const zlib = require('zlib');
-
-const app = express();
-
-// Large QR data payload handle karne ke liye limit badhayi gayi hai
-app.use(express.json({ limit: '10mb' }));
-
-// Helper function: BigInt / Numeric String ko Byte Buffer me convert karne ke liye
-function bigIntToBytes(bigIntString) {
-    let bigInt = BigInt(bigIntString);
-    const hex = bigInt.toString(16);
-    const evenHex = hex.length % 2 === 0 ? hex : '0' + hex;
-    return Buffer.from(evenHex, 'hex');
-}
-
-// Main API Route
 app.post('/api/decode-aadhaar', (req, res) => {
     try {
-        const { qrData } = req.body;
+        let qrData = null;
 
-        if (!qrData) {
+        // 1. Agar JSON body aayi ho
+        if (req.body && typeof req.body === 'object') {
+            qrData = req.body.qrData;
+        }
+
+        // 2. Agar String ke roop me payload aaya ho
+        if (!qrData && typeof req.body === 'string') {
+            try {
+                const parsed = JSON.parse(req.body);
+                qrData = parsed.qrData || req.body;
+            } catch (e) {
+                qrData = req.body; // Raw numeric text string
+            }
+        }
+
+        // 3. Agar fir bhi qrData nahi mila
+        if (!qrData || qrData.trim() === '') {
+            console.log("Error 400: Received Empty Payload. Body:", req.body);
             return res.status(400).json({ 
                 success: false, 
-                message: 'qrData field blank hai' 
+                message: "qrData empty or invalid format" 
             });
         }
 
-        // 1. BigInt String ko Byte Buffer me convert karein
+        // --- Decoding Logic ---
         const compressedBuffer = bigIntToBytes(qrData);
-
-        // 2. Zlib Raw Deflate se Decompress karein
         const decompressedBuffer = zlib.inflateRawSync(compressedBuffer);
 
-        // 3. Byte 255 (0xFF) delimiter se Data split karein
         const parts = [];
         let currentPart = [];
-
         for (let i = 0; i < decompressedBuffer.length; i++) {
             if (decompressedBuffer[i] === 255) {
                 parts.push(Buffer.from(currentPart));
@@ -44,32 +40,21 @@ app.post('/api/decode-aadhaar', (req, res) => {
                 currentPart.push(decompressedBuffer[i]);
             }
         }
-        if (currentPart.length > 0) {
-            parts.push(Buffer.from(currentPart));
-        }
+        if (currentPart.length > 0) parts.push(Buffer.from(currentPart));
 
-        // 4. Text aur Photo Parse karein
         const textDataString = parts[1] ? parts[1].toString('utf8') : '';
         const textFields = textDataString.split(',');
-
-        // Photo Byte Array ko Base64 String me convert karein
         const photoBase64 = parts[2] ? `data:image/jpeg;base64,${parts[2].toString('base64')}` : null;
 
-        // Clean JSON Output
-        return res.json({
+        return res.status(200).json({
             success: true,
             data: {
-                referenceId: textFields[0] || '',
                 name: textFields[1] || '',
                 dob: textFields[2] || '',
                 gender: textFields[3] || '',
                 address: {
                     house: textFields[5] || '',
-                    street: textFields[6] || '',
-                    landmark: textFields[7] || '',
-                    locality: textFields[8] || '',
                     vtc: textFields[9] || '',
-                    district: textFields[10] || '',
                     state: textFields[11] || '',
                     pincode: textFields[12] || ''
                 },
@@ -78,17 +63,11 @@ app.post('/api/decode-aadhaar', (req, res) => {
         });
 
     } catch (error) {
-        console.error('Decoding Error:', error.message);
+        console.error("Decoding Error:", error.message);
         return res.status(500).json({ 
             success: false, 
-            message: 'QR Code decode nahi ho paya. Invalid or Corrupted QR data.', 
+            message: "Decode error", 
             error: error.message 
         });
     }
-});
-
-// Server Port Setup
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server started on port ${PORT}`);
 });
