@@ -3,49 +3,71 @@ const zlib = require('zlib');
 
 const app = express();
 
-// MOST IMPORTANT: Kisi bhi tarah ke Content-Type data ko Text ke roop me catch karega
+// Catch all raw body formats
 app.use(express.text({ type: '*/*', limit: '10mb' }));
 app.use(express.json({ limit: '10mb' }));
 
+// Clean BigInt to Bytes Function
 function bigIntToBytes(bigIntString) {
-    let bigInt = BigInt(bigIntString);
-    const hex = bigInt.toString(16);
-    const evenHex = hex.length % 2 === 0 ? hex : '0' + hex;
-    return Buffer.from(evenHex, 'hex');
+    // SIRF Digits (0-9) rakhein, bakisab (spaces, newlines, quotes) hata dein
+    const cleanNumericString = String(bigIntString).replace(/\D/g, '');
+
+    if (!cleanNumericString) {
+        throw new Error("QR Data me koi valid numeric digits nahi mile.");
+    }
+
+    let bigInt = BigInt(cleanNumericString);
+    let hex = bigInt.toString(16);
+
+    // Byte alignment (Even Hex Length)
+    if (hex.length % 2 !== 0) {
+        hex = '0' + hex;
+    }
+
+    return Buffer.from(hex, 'hex');
 }
 
 app.post('/api/decode-aadhaar', (req, res) => {
     try {
-        let qrData = req.body;
+        let rawInput = req.body;
 
-        // 1. Agar data JSON String format me mila ho
-        if (typeof qrData === 'string' && qrData.trim().startsWith('{')) {
+        // Agar JSON String me aaya ho
+        if (typeof rawInput === 'string' && rawInput.trim().startsWith('{')) {
             try {
-                const parsed = JSON.parse(qrData);
-                qrData = parsed.qrData || qrData;
+                const parsed = JSON.parse(rawInput);
+                rawInput = parsed.qrData || rawInput;
             } catch (e) {
                 // Ignore parse error
             }
         }
 
-        // 2. Extra quotes ya spaces clean karein
-        if (typeof qrData === 'string') {
-            qrData = qrData.trim().replace(/^"|"$/g, '');
-        }
+        console.log("--> Received Data Length:", String(rawInput).length);
 
-        // 3. Data validation
-        if (!qrData || qrData.length < 10) {
-            console.log("Error: Data Empty ya invalid mila:", qrData);
+        // 1. BigInt Conversion
+        let compressedBuffer;
+        try {
+            compressedBuffer = bigIntToBytes(rawInput);
+        } catch (err) {
             return res.status(400).json({ 
                 success: false, 
-                message: "QR Data khali ya invalid hai" 
+                message: "Invalid Numeric QR Data", 
+                error: err.message 
             });
         }
 
-        // --- Aadhaar Decoding Logic ---
-        const compressedBuffer = bigIntToBytes(qrData);
-        const decompressedBuffer = zlib.inflateRawSync(compressedBuffer);
+        // 2. Zlib Decompression
+        let decompressedBuffer;
+        try {
+            decompressedBuffer = zlib.inflateRawSync(compressedBuffer);
+        } catch (err) {
+            return res.status(500).json({ 
+                success: false, 
+                message: "Zlib Decompression Failed. QR Data corrupt ho sakta hai.", 
+                error: err.message 
+            });
+        }
 
+        // 3. Byte 255 (0xFF) Delimiter Parsing
         const parts = [];
         let currentPart = [];
         for (let i = 0; i < decompressedBuffer.length; i++) {
@@ -58,6 +80,7 @@ app.post('/api/decode-aadhaar', (req, res) => {
         }
         if (currentPart.length > 0) parts.push(Buffer.from(currentPart));
 
+        // 4. Extract Text & Photo
         const textDataString = parts[1] ? parts[1].toString('utf8') : '';
         const textFields = textDataString.split(',');
         const photoBase64 = parts[2] ? `data:image/jpeg;base64,${parts[2].toString('base64')}` : null;
@@ -65,12 +88,15 @@ app.post('/api/decode-aadhaar', (req, res) => {
         return res.status(200).json({
             success: true,
             data: {
+                referenceId: textFields[0] || '',
                 name: textFields[1] || '',
                 dob: textFields[2] || '',
                 gender: textFields[3] || '',
                 address: {
                     house: textFields[5] || '',
+                    street: textFields[6] || '',
                     vtc: textFields[9] || '',
+                    district: textFields[10] || '',
                     state: textFields[11] || '',
                     pincode: textFields[12] || ''
                 },
@@ -79,10 +105,10 @@ app.post('/api/decode-aadhaar', (req, res) => {
         });
 
     } catch (error) {
-        console.error("Decoding Error:", error.message);
+        console.error("General Error:", error.message);
         return res.status(500).json({ 
             success: false, 
-            message: "Decode error", 
+            message: "Internal Server Processing Error", 
             error: error.message 
         });
     }
