@@ -8,18 +8,14 @@ app.use(express.json({ limit: '10mb' }));
 
 function bigIntToBytes(bigIntString) {
     const cleanNumericString = String(bigIntString).replace(/\D/g, '');
-
     if (!cleanNumericString) {
         throw new Error("QR Data me koi valid numeric digits nahi mile.");
     }
-
     let bigInt = BigInt(cleanNumericString);
     let hex = bigInt.toString(16);
-
     if (hex.length % 2 !== 0) {
         hex = '0' + hex;
     }
-
     return Buffer.from(hex, 'hex');
 }
 
@@ -31,53 +27,28 @@ app.post('/api/decode-aadhaar', (req, res) => {
             try {
                 const parsed = JSON.parse(rawInput);
                 rawInput = parsed.qrData || rawInput;
-            } catch (e) {
-                // Ignore
-            }
+            } catch (e) {}
         }
 
         const cleanDigits = String(rawInput).replace(/\D/g, '');
         console.log("--> Received Clean Data Length:", cleanDigits.length);
 
-        // 1. Convert BigInt to Bytes
-        let compressedBuffer;
-        try {
-            compressedBuffer = bigIntToBytes(cleanDigits);
-        } catch (err) {
-            return res.status(400).json({ 
-                success: false, 
-                message: "Invalid Numeric QR Data", 
-                error: err.message 
-            });
-        }
+        // 1. BigInt to Bytes
+        const compressedBuffer = bigIntToBytes(cleanDigits);
 
-        // 2. Multi-Format Decompression (Fallback mechanism)
+        // 2. Decompress
         let decompressedBuffer = null;
-
-        // Try 1: Inflate Raw
         try {
             decompressedBuffer = zlib.inflateRawSync(compressedBuffer);
         } catch (e1) {
-            // Try 2: Standard Inflate (with header)
             try {
                 decompressedBuffer = zlib.inflateSync(compressedBuffer);
             } catch (e2) {
-                // Try 3: Gunzip
-                try {
-                    decompressedBuffer = zlib.gunzipSync(compressedBuffer);
-                } catch (e3) {
-                    console.error("All decompression methods failed.");
-                    return res.status(400).json({ 
-                        success: false, 
-                        message: "Decompression failed. Data cut ya corrupt hai.", 
-                        receivedLength: cleanDigits.length,
-                        error: e1.message 
-                    });
-                }
+                decompressedBuffer = zlib.gunzipSync(compressedBuffer);
             }
         }
 
-        // 3. Byte 255 Delimiter Parsing
+        // 3. Byte 255 (0xFF) Split
         const parts = [];
         let currentPart = [];
         for (let i = 0; i < decompressedBuffer.length; i++) {
@@ -90,25 +61,36 @@ app.post('/api/decode-aadhaar', (req, res) => {
         }
         if (currentPart.length > 0) parts.push(Buffer.from(currentPart));
 
-        // 4. Extract Text & Photo
-        const textDataString = parts[1] ? parts[1].toString('utf8') : '';
-        const textFields = textDataString.split(',');
-        const photoBase64 = parts[2] ? `data:image/jpeg;base64,${parts[2].toString('base64')}` : null;
+        // 4. Photo aur Text Parts ko alag Karein
+        let photoBase64 = null;
+        let textParts = [];
 
+        parts.forEach((part) => {
+            // JPEG Header (0xFF 0xD8 -> 255, 216) ya Large Buffer check karein
+            if (part.length > 500 || (part.length > 2 && part[0] === 255 && part[1] === 216)) {
+                photoBase64 = `data:image/jpeg;base64,${part.toString('base64')}`;
+            } else {
+                textParts.push(part.toString('utf8').trim());
+            }
+        });
+
+        console.log("--> Extracted Text Parts:", textParts);
+
+        // Aadhaar V2 Secure QR Structure
         return res.status(200).json({
             success: true,
             data: {
-                referenceId: textFields[0] || '',
-                name: textFields[1] || '',
-                dob: textFields[2] || '',
-                gender: textFields[3] || '',
+                referenceId: textParts[1] || textParts[0] || '',
+                name: textParts[2] || '',
+                dob: textParts[3] || '',
+                gender: textParts[4] || '',
                 address: {
-                    house: textFields[5] || '',
-                    street: textFields[6] || '',
-                    vtc: textFields[9] || '',
-                    district: textFields[10] || '',
-                    state: textFields[11] || '',
-                    pincode: textFields[12] || ''
+                    house: textParts[5] || '',
+                    street: textParts[6] || '',
+                    vtc: textParts[7] || textParts[8] || '',
+                    district: textParts[9] || textParts[8] || '',
+                    state: textParts[10] || '',
+                    pincode: textParts[11] || textParts[12] || ''
                 },
                 photoBase64: photoBase64
             }
