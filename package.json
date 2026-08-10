@@ -1,0 +1,13 @@
+{
+  "name": "aadhaar-decoder-api",
+  "version": "1.0.0",
+  "description": "Secure Aadhaar QR Code Decoder API for Kodular",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "zlib": "^1.0.5"
+  }
+}
