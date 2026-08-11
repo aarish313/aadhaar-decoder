@@ -1,76 +1,114 @@
 const express = require('express');
-const cors = require('cors');
 const zlib = require('zlib');
 
 const app = express();
 
-// Render ke dwara diya gaya dynamic PORT use karein
-const PORT = process.env.PORT || 3000;
+app.use(express.text({ type: '*/*', limit: '10mb' }));
+app.use(express.json({ limit: '10mb' }));
 
-// Middlewares
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-
-// Safe Decompress Function (Fixes header check error)
-function safeDecompress(inputBuffer) {
-  let buffer = Buffer.isBuffer(inputBuffer)
-    ? inputBuffer
-    : Buffer.from(inputBuffer, 'binary');
-
-  try {
-    return zlib.inflateSync(buffer);
-  } catch (err1) {
-    try {
-      return zlib.inflateRawSync(buffer);
-    } catch (err2) {
-      try {
-        return zlib.gunzipSync(buffer);
-      } catch (err3) {
-        throw new Error("Invalid or Corrupted QR Header Data");
-      }
+function bigIntToBytes(bigIntString) {
+    const cleanNumericString = String(bigIntString).replace(/\D/g, '');
+    if (!cleanNumericString) {
+        throw new Error("QR Data me koi valid numeric digits nahi mile.");
     }
-  }
+    let bigInt = BigInt(cleanNumericString);
+    let hex = bigInt.toString(16);
+    if (hex.length % 2 !== 0) {
+        hex = '0' + hex;
+    }
+    return Buffer.from(hex, 'hex');
 }
 
-// Health Check Endpoint (Render checks this)
-app.get('/', (req, res) => {
-  res.status(200).send("Server is running successfully!");
-});
+app.post('/api/decode-aadhaar', (req, res) => {
+    try {
+        let rawInput = req.body;
 
-// Main QR Scan Endpoint
-app.post('/api/scan', (req, res) => {
-  try {
-    const { qrRawData } = req.body;
+        if (typeof rawInput === 'string' && rawInput.trim().startsWith('{')) {
+            try {
+                const parsed = JSON.parse(rawInput);
+                rawInput = parsed.qrData || rawInput;
+            } catch (e) {}
+        }
 
-    if (!qrRawData) {
-      return res.status(400).json({ 
-        status: 'error', 
-        message: 'No QR data provided in req.body' 
-      });
+        const cleanDigits = String(rawInput).replace(/\D/g, '');
+        console.log("--> Received Clean Data Length:", cleanDigits.length);
+
+        // 1. BigInt to Bytes
+        const compressedBuffer = bigIntToBytes(cleanDigits);
+
+        // 2. Decompress
+        let decompressedBuffer = null;
+        try {
+            decompressedBuffer = zlib.inflateRawSync(compressedBuffer);
+        } catch (e1) {
+            try {
+                decompressedBuffer = zlib.inflateSync(compressedBuffer);
+            } catch (e2) {
+                decompressedBuffer = zlib.gunzipSync(compressedBuffer);
+            }
+        }
+
+        // 3. Byte 255 (0xFF) Split
+        const parts = [];
+        let currentPart = [];
+        for (let i = 0; i < decompressedBuffer.length; i++) {
+            if (decompressedBuffer[i] === 255) {
+                parts.push(Buffer.from(currentPart));
+                currentPart = [];
+            } else {
+                currentPart.push(decompressedBuffer[i]);
+            }
+        }
+        if (currentPart.length > 0) parts.push(Buffer.from(currentPart));
+
+
+        // 4. Photo aur Text Parts Extract Karein
+        let photoBase64 = null;
+        let textParts = [];
+
+        parts.forEach((part) => {
+            // Check if buffer is JPEG photo (Header: 255, 216) ya Size > 300 bytes
+            if (part.length > 300 || (part.length > 2 && part[0] === 255 && part[1] === 216)) {
+                photoBase64 = `data:image/jpeg;base64,${part.toString('base64')}`;
+            } else {
+                const textStr = part.toString('utf8').trim();
+                if (textStr.length > 0) {
+                    textParts.push(textStr);
+                }
+            }
+        });
+
+        console.log("--> Extracted Text Parts:", textParts);
+
+        // Aadhaar V2 Secure QR Structure
+        return res.status(200).json({
+            success: true,
+            data: {
+                referenceId: textParts[1] || textParts[0] || '',
+                name: textParts[2] || '',
+                dob: textParts[3] || '',
+                gender: textParts[4] || '',
+                address: {
+                    house: textParts[5] || '',
+                    street: textParts[6] || '',
+                    vtc: textParts[7] || textParts[8] || '',
+                    district: textParts[9] || textParts[8] || '',
+                    state: textParts[10] || '',
+                    pincode: textParts[11] || textParts[12] || ''
+                },
+                photoBase64: photoBase64
+            }
+        });
+
+    } catch (error) {
+        console.error("General Error:", error.message);
+        return res.status(500).json({ 
+            success: false, 
+            message: "Internal Processing Error", 
+            error: error.message 
+        });
     }
-
-    // Convert input to Buffer
-    const buffer = Buffer.from(qrRawData, 'base64');
-    
-    // Decompress safely
-    const decompressed = safeDecompress(buffer);
-
-    res.json({
-      status: 'success',
-      data: decompressed.toString('utf-8')
-    });
-
-  } catch (error) {
-    console.error("Processing Error:", error.message);
-    res.status(500).json({
-      status: 'error',
-      message: error.message || "Failed to decompress QR data"
-    });
-  }
 });
 
-// Render par chalane ke liye 0.0.0.0 par bind karna zaroori hai
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
